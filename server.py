@@ -2005,10 +2005,11 @@ async def api_sticky_notes_generate(request):
     err = _require_auth(request)
     if err: return err
     try:
-        # 1. Get recent dynamic buckets for reflection
+        # 1. Get recent buckets for reflection (including permanent/pinned)
         all_buckets = await bucket_mgr.list_all(include_archive=False)
+        # Only exclude "feel" type (self-reflections), include permanent + dynamic
         recent = sorted(
-            [b for b in all_buckets if b["metadata"].get("type") not in ("permanent", "feel")],
+            [b for b in all_buckets if b["metadata"].get("type") != "feel"],
             key=lambda b: b["metadata"].get("updated_at", ""),
             reverse=True,
         )[:5]
@@ -2083,8 +2084,9 @@ async def _auto_sticky_note_loop():
             await asyncio.sleep(STICKY_NOTE_INTERVAL_HOURS * 3600)
             # Use the same logic as /api/sticky-notes/generate
             all_buckets = await bucket_mgr.list_all(include_archive=False)
+            # Only exclude "feel" type, include permanent + dynamic
             recent = sorted(
-                [b for b in all_buckets if b["metadata"].get("type") not in ("permanent", "feel")],
+                [b for b in all_buckets if b["metadata"].get("type") != "feel"],
                 key=lambda b: b["metadata"].get("updated_at", ""),
                 reverse=True,
             )[:5]
