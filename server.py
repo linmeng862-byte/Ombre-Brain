@@ -1959,7 +1959,7 @@ async def api_sticky_notes_create(request):
             "id": hashlib.sha256(f"{time.time()}{content}".encode()).hexdigest()[:12],
             "content": content,
             "source": body.get("source", "user"),  # "user" or "claude"
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "read": False,
         }
         notes.append(note)
@@ -2070,7 +2070,7 @@ async def api_sticky_notes_generate(request):
             "id": hashlib.sha256(f"{time.time()}{note_content}".encode()).hexdigest()[:12],
             "content": note_content,
             "source": "claude",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "read": False,
         }
         notes.append(note)
@@ -2144,7 +2144,7 @@ async def _auto_sticky_note_loop():
                 "id": hashlib.sha256(f"{time.time()}{note_content}".encode()).hexdigest()[:12],
                 "content": note_content,
                 "source": "claude",
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "read": False,
             }
             notes.append(note)
