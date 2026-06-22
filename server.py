@@ -2041,18 +2041,28 @@ async def api_sticky_notes_generate(request):
         if not api_key:
             return JSONResponse({"ok": False, "message": "No API key configured for LLM"})
 
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=api_key,
-            base_url=dehy_config.get("base_url", "https://api.deepseek.com/v1"),
-        )
-        response = client.chat.completions.create(
-            model=dehy_config.get("model", "deepseek-chat"),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.9,
-        )
-        note_content = response.choices[0].message.content.strip()
+        # Debug: log API key status
+        logger.info(f"Sticky note generate | api_key found: {bool(api_key)} | base_url: {dehy_config.get('base_url', 'default')} | model: {dehy_config.get('model', 'default')}")
+
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=api_key,
+                base_url=dehy_config.get("base_url", "https://api.deepseek.com/v1"),
+            )
+            response = client.chat.completions.create(
+                model=dehy_config.get("model", "deepseek-chat"),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.9,
+            )
+            note_content = response.choices[0].message.content.strip()
+        except Exception as llm_err:
+            logger.error(f"Sticky note LLM call failed: {llm_err}")
+            return JSONResponse({"error": f"LLM API 调用失败: {str(llm_err)}", "detail": str(llm_err)}, status_code=500)
+
+        # Debug: log API key status
+        logger.info(f"Sticky note generate | api_key found: {bool(api_key)} | base_url: {dehy_config.get('base_url', 'default')} | model: {dehy_config.get('model', 'default')}")
 
         # 4. Save as sticky note
         notes = _load_sticky_notes()
