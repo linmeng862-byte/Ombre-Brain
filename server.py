@@ -1260,6 +1260,45 @@ async def dream() -> str:
 
 
 # =============================================================
+# whisper — Leave a sticky note for the user / 留一张小纸条
+# =============================================================
+@mcp.tool()
+async def whisper(content: str = "") -> str:
+    """Leave a short caring note (sticky note) for the user.
+
+    Use this when:
+    - You want to leave a warm, caring message for the user to find later
+    - You feel touched by something the user shared and want to express it
+    - You want to gently remind or encourage the user about something
+    - You feel an emotional impulse to reach out beyond the current conversation
+
+    The note will appear on the Ombre Brain Dashboard under "小纸条".
+    Keep it short (1-3 sentences), warm, and personal — like a friend's Post-it note.
+
+    Args:
+        content: The note text. Keep it 1-3 sentences, warm and caring, in the user's language (Chinese if they speak Chinese).
+
+    Returns:
+        Confirmation that the note was saved.
+    """
+    if not content.strip():
+        return "⚠ 小纸条内容不能为空"
+
+    notes = _load_sticky_notes()
+    note = {
+        "id": hashlib.sha256(f"{time.time()}{content}".encode()).hexdigest()[:12],
+        "content": content.strip(),
+        "source": "claude",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "read": False,
+    }
+    notes.append(note)
+    _save_sticky_notes(notes)
+    logger.info(f"Whisper (sticky note) saved: {content[:50]}...")
+    return f"💌 小纸条已留下：{content.strip()}"
+
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
