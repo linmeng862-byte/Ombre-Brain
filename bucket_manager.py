@@ -682,6 +682,7 @@ class BucketManager:
             "dynamic_count": 0,
             "archive_count": 0,
             "feel_count": 0,
+            "evolution_count": 0,
             "total_size_kb": 0.0,
             "domains": {},
         }
