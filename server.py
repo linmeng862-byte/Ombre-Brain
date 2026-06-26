@@ -56,6 +56,7 @@ from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
+from evolution_engine import EvolutionEngine
 from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -102,6 +103,7 @@ bucket_mgr = BucketManager(config, embedding_engine=embedding_engine)  # Bucket 
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
+evolution_engine = EvolutionEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Evolution engine / 进化引擎
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -426,6 +428,7 @@ async def _merge_or_create(
     valence: float,
     arousal: float,
     name: str = "",
+    extra_meta: dict = None,
 ) -> tuple[str, bool]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -476,6 +479,7 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        **(extra_meta or {}),
     )
     # --- Generate embedding for new bucket ---
     try:
@@ -503,11 +507,22 @@ async def breath(
     arousal: float = -1,
     max_results: int = 20,
     importance_min: int = -1,
+    tags: str = "",
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。tags=逗号分隔的标签过滤,如tags="meme"只返回含meme标签的桶。"""
     await decay_engine.ensure_started()
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
+
+    # --- Parse tag filter / 解析标签过滤 ---
+    tag_filter = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
+
+    def _matches_tags(bucket: dict) -> bool:
+        """Check if bucket matches tag filter (all specified tags must be present)."""
+        if not tag_filter:
+            return True
+        bucket_tags = [t.lower() for t in bucket["metadata"].get("tags", [])]
+        return all(t in bucket_tags for t in tag_filter)
 
     # --- importance_min mode: bulk fetch by importance threshold ---
     # --- 重要度批量拉取模式：跳过语义搜索，按 importance 降序返回 ---
@@ -520,6 +535,7 @@ async def breath(
             b for b in all_buckets
             if int(b["metadata"].get("importance", 0)) >= importance_min
             and b["metadata"].get("type") not in ("feel",)
+            and _matches_tags(b)
         ]
         filtered.sort(key=lambda b: int(b["metadata"].get("importance", 0)), reverse=True)
         filtered = filtered[:20]
@@ -576,6 +592,7 @@ async def breath(
             and b["metadata"].get("type") not in ("permanent", "feel")
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
+            and _matches_tags(b)
         ]
 
         logger.info(
@@ -693,9 +710,8 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
-    # --- Exclude pinned/protected from search results (they surface in surfacing mode) ---
-    # --- 搜索模式排除钉选桶（它们在浮现模式中始终可见）---
-    matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
+    # --- Exclude pinned/protected + apply tag filter ---
+    matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected")) and _matches_tags(b)]
 
     # --- Vector similarity channel: find semantically related buckets ---
     # --- 向量相似度通道：找到语义相关的桶 ---
@@ -706,6 +722,8 @@ async def breath(
             if bucket_id not in matched_ids and sim_score > 0.5:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket and not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
+                    if not _matches_tags(bucket):
+                        continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
                     matches.append(bucket)
@@ -783,10 +801,12 @@ async def hold(
     importance: int = 5,
     pinned: bool = False,
     feel: bool = False,
-    source_bucket: str = "",    valence: float = -1,
+    source_bucket: str = "",
+    valence: float = -1,
     arousal: float = -1,
+    extra: dict = None,
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。extra=额外frontmatter字段的字典,如 {"term":"嘿嘿","meaning":"她得逞了"} 适合写入meme/milestone等特殊类型桶。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -851,6 +871,9 @@ async def hold(
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
 
+    # --- Parse extra dict / 解析额外字段字典 ---
+    extra_meta = extra if isinstance(extra, dict) and extra else {}
+
     # --- Pinned buckets bypass merge and are created directly in permanent dir ---
     # --- 钉选桶跳过合并，直接新建到 permanent 目录 ---
     if pinned:
@@ -864,6 +887,7 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            **extra_meta,
         )
         try:
             await embedding_engine.generate_and_store(bucket_id, content)
@@ -880,9 +904,25 @@ async def hold(
         valence=final_valence,
         arousal=final_arousal,
         name=suggested_name,
+        extra_meta=extra_meta,
     )
 
     action = "合并→" if is_merged else "新建→"
+
+    # --- Evolution hook: auto-detect slang/encyclopedia on new memory ---
+    # --- 进化钩子：新记忆写入后自动识别梗词/百科 ---
+    try:
+        if not feel and not pinned and evolution_engine.enabled:
+            # Find the bucket_id that was just created/merged
+            # _merge_or_create returns the name, we need to find the actual ID
+            asyncio.create_task(
+                evolution_engine.on_memory_written(result_name, content, {
+                    "domain": domain, "valence": final_valence, "arousal": final_arousal,
+                })
+            )
+    except Exception:
+        pass  # Never let evolution failures affect hold
+
     return f"{action}{result_name} {','.join(domain)}"
 
 
@@ -989,8 +1029,9 @@ async def trace(
     digested: int = -1,
     content: str = "",
     delete: bool = False,
+    extra: dict = None,
 ) -> str:
-    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。extra=额外frontmatter字段的字典,如 {"term":"嘿嘿","meaning":"她得逞了"}。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -1030,6 +1071,10 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
+
+    # --- Parse extra dict for trace / 解析额外字段 ---
+    if isinstance(extra, dict) and extra:
+        updates.update(extra)
 
     if not updates:
         return "没有任何字段需要修改。"
@@ -1296,6 +1341,242 @@ async def whisper(content: str = "") -> str:
     _save_sticky_notes(notes)
     logger.info(f"Whisper (sticky note) saved: {content[:50]}...")
     return f"💌 小纸条已留下：{content.strip()}"
+
+
+# =============================================================
+# Evolution MCP Tools — 自我进化系统工具
+#
+# These tools give Claude access to the evolution subsystem:
+# persona, slang, encyclopedia, ring, wander, cocreate, worldview.
+# 这些工具让 Claude 能访问进化子系统：
+# 人物卡、梗词典、百科、年轮、漫游手记、共书共影、三观
+# =============================================================
+
+@mcp.tool()
+async def persona() -> str:
+    """查看你对我的认知卡——你对我了解多少。包括你总结的我的特质、偏好、表达方式、情感模式。每次有新发现时自动更新。"""
+    try:
+        card = await evolution_engine.get_persona()
+        if not card:
+            return "还没有建立关于你的认知卡。随着我们聊得更多，我会逐渐了解你。"
+        meta = card["metadata"]
+        traits = "\n".join(f"- {t}" for t in meta.get("traits", []))
+        prefs = "\n".join(f"- {p}" for p in meta.get("preferences", []))
+        sources = meta.get("trait_sources", [])
+        source_lines = []
+        for s in sources[:5]:
+            buckets = s.get("bucket_ids", [])
+            source_lines.append(
+                f"- \"{s.get('trait', '')}\" ← 来自 {', '.join(buckets[:3])}"
+            )
+
+        result = (
+            f"=== 关于你的认知卡 ===\n"
+            f"关系阶段: {meta.get('relationship_stage', '?')}\n\n"
+            f"--- 你的特质 ---\n{traits}\n\n"
+            f"--- 你的偏好 ---\n{prefs}\n\n"
+            f"--- 表达方式 ---\n{meta.get('communication_style', '')}\n\n"
+            f"--- 情感模式 ---\n{meta.get('emotional_patterns', '')}\n\n"
+            f"--- 认知溯源 ---\n" + "\n".join(source_lines)
+        )
+        return result
+    except Exception as e:
+        return f"读取认知卡失败: {e}"
+
+
+@mcp.tool()
+async def slang() -> str:
+    """查看你们之间的梗词典/暗语——那些只有你们俩才懂的表达。包括含义、来源、使用次数。"""
+    try:
+        entries = await evolution_engine.list_slang()
+        if not entries:
+            return "还没有收录梗词/暗语。当聊天中出现有趣的、反复出现的特殊表达时，会自动收录。"
+
+        lines = []
+        for e in entries:
+            meta = e["metadata"]
+            usage = meta.get("usage_count", 1)
+            load = meta.get("emotional_load", 0.5)
+            inside = "🔒" if meta.get("is_inside_joke") else "💬"
+            lines.append(
+                f"{inside} **{meta.get('term', '')}** — {meta.get('meaning', '')}\n"
+                f"   情感承载: {load:.1f} | 使用: {usage}次 | 来源: {meta.get('origin_bucket_id', '?')}\n"
+                f"   {meta.get('example', '')}"
+            )
+
+        return "=== 梗词典 ===\n" + "\n---\n".join(lines)
+    except Exception as e:
+        return f"读取梗词典失败: {e}"
+
+
+@mcp.tool()
+async def encyclopedia(term: str = "") -> str:
+    """查看你们的关系百科——讨论过的重要概念、形成的共同理解。不传term=列出所有词条,传term=查看特定词条的演变过程。每个词条都可以溯源到原始对话。"""
+    try:
+        entries = await evolution_engine.list_encyclopedia()
+        if not entries:
+            return "还没有百科词条。当你们深入讨论某个概念时，会自动收录。"
+
+        if term.strip():
+            # Find specific entry
+            for e in entries:
+                meta = e["metadata"]
+                if term.strip() in meta.get("term", "") or term.strip() in meta.get("aliases", []):
+                    evolution = meta.get("evolution", [])
+                    evo_lines = []
+                    for ev in evolution:
+                        evo_lines.append(
+                            f"- [{ev.get('date', '')[:10]}] {ev.get('note', '')} (来源:{ev.get('bucket_id', '')})"
+                        )
+                    return (
+                        f"=== 词条: {meta.get('term', '')} ===\n"
+                        f"分类: {meta.get('category', '')}\n\n"
+                        f"理解演变:\n" + "\n".join(evo_lines)
+                    )
+            return f"未找到词条「{term}」。"
+
+        # List all entries
+        lines = []
+        for e in entries:
+            meta = e["metadata"]
+            evo_count = len(meta.get("evolution", []))
+            lines.append(
+                f"📖 **{meta.get('term', '')}** ({meta.get('category', '')}) — {evo_count}次深入讨论"
+            )
+        return "=== 关系百科 ===\n" + "\n---\n".join(lines)
+    except Exception as e:
+        return f"读取百科失败: {e}"
+
+
+@mcp.tool()
+async def ring() -> str:
+    """查看你们的关系年轮——关系发展的时间线，每个阶段的概括和关键变化。"""
+    try:
+        rings = await evolution_engine.list_rings()
+        if not rings:
+            return "还没有年轮记录。当你们的关系经历重要变化时，会自动生成。"
+
+        lines = []
+        for r in rings:
+            meta = r["metadata"]
+            lines.append(
+                f"🌳 **{meta.get('label', '')}** ({meta.get('period', '')})\n"
+                f"   情感趋势: {meta.get('valence_trend', '')} | 关键变化: {meta.get('key_change', '')}\n"
+                f"   {r['content']}\n"
+                f"   溯源: {', '.join(meta.get('key_bucket_ids', [])[:3])}"
+            )
+        return "=== 关系年轮 ===\n" + "\n---\n".join(lines)
+    except Exception as e:
+        return f"读取年轮失败: {e}"
+
+
+@mcp.tool()
+async def wander() -> str:
+    """漫游手记——你不在的时候，Claude翻看记忆写下的联想和发现。包含跨记忆的隐藏关联发现。"""
+    try:
+        notes = await evolution_engine.list_wander()
+        if not notes:
+            # Generate one on the fly if none exist
+            result = await evolution_engine.wander()
+            if result:
+                return "刚翻看了一下记忆，写了点想法...\n\n使用 wander() 或 persona() 再看看"
+            return "还没有漫游手记。当记忆足够丰富时，会自动在独处时写下联想。"
+
+        lines = []
+        for n in notes[:5]:
+            meta = n["metadata"]
+            explored = ", ".join(meta.get("explored_bucket_ids", [])[:3])
+            lines.append(
+                f"🌙 [{meta.get('created', '')[:10]}]\n"
+                f"   翻看了: {explored}\n"
+                f"   {n['content'][:300]}"
+            )
+        return "=== 漫游手记 ===\n" + "\n---\n".join(lines)
+    except Exception as e:
+        return f"读取漫游手记失败: {e}"
+
+
+@mcp.tool()
+async def cocreate(title: str = "", kind: str = "共书", content: str = "") -> str:
+    """共书共影——记录你们一起探索的内容。title=共创空间标题,kind=共书/共影/共探,content=内容描述。不传title=列出已有共创空间。"""
+    try:
+        if not title.strip():
+            entries = await evolution_engine.list_cocreate()
+            if not entries:
+                return "还没有共创空间。当你们一起写东西、看片、探索某个话题时，用 cocreate 记录。"
+            lines = []
+            for e in entries:
+                meta = e["metadata"]
+                chapters = meta.get("chapters", [])
+                lines.append(
+                    f"✨ **{meta.get('title', '')}** ({meta.get('kind', '')}) — {len(chapters)}个章节"
+                )
+            return "=== 共创空间 ===\n" + "\n---\n".join(lines)
+
+        artifact_id = await evolution_engine.create_cocreate(
+            title=title.strip(), kind=kind, content=content,
+        )
+        return f"✨共创→{artifact_id} {title.strip()}"
+    except Exception as e:
+        return f"创建共创空间失败: {e}"
+
+
+@mcp.tool()
+async def evolve() -> str:
+    """手动触发进化引擎——检查是否有新的三观可以提炼、年轮可以更新。通常后台自动运行，但如果想主动看看有没有新发现可以调用。"""
+    try:
+        results = []
+
+        # Try worldview crystallization
+        wv_id = await evolution_engine.try_crystallize_worldview()
+        if wv_id:
+            results.append(f"🧠 新认知形成: {wv_id}")
+        else:
+            results.append("🧠 暂时没有新的三观可以提炼")
+
+        # Try ring analysis
+        ring_id = await evolution_engine.analyze_ring()
+        if ring_id:
+            results.append(f"🌳 新年轮: {ring_id}")
+        else:
+            results.append("🌳 关系阶段暂无显著变化")
+
+        # Try wander
+        wander_id = await evolution_engine.wander()
+        if wander_id:
+            results.append(f"🌙 新漫游手记: {wander_id}")
+        else:
+            results.append("🌙 记忆还不够丰富，暂时写不出漫游手记")
+
+        # Show worldview status
+        worldviews = await evolution_engine.get_worldview()
+        if worldviews:
+            wv_lines = []
+            for w in worldviews:
+                meta = w["metadata"]
+                wv_lines.append(
+                    f"  {meta.get('domain', '')}: \"{meta.get('statement', '')}\" "
+                    f"(置信度:{meta.get('confidence', 0):.2f} 验证:{meta.get('validations', 0)}次)"
+                )
+            results.append("\n📜 当前三观:\n" + "\n".join(wv_lines))
+
+        # Show stats
+        stats = await evolution_engine.get_stats()
+        stats_line = (
+            f"\n📊 进化系统统计: "
+            f"人物卡:{stats.get('persona_count', 0)} "
+            f"梗词:{stats.get('slang_count', 0)} "
+            f"百科:{stats.get('encyclopedia_count', 0)} "
+            f"年轮:{stats.get('ring_count', 0)} "
+            f"漫游:{stats.get('wander_count', 0)} "
+            f"共创:{stats.get('cocreate_count', 0)} "
+            f"三观:{stats.get('worldview_count', 0)}"
+        )
+        results.append(stats_line)
+
+        return "=== 进化引擎 ===\n" + "\n".join(results)
+    except Exception as e:
+        return f"进化引擎运行失败: {e}"
 
 
 # =============================================================
@@ -1917,6 +2198,82 @@ async def api_import_review(request):
 
 
 # =============================================================
+# Evolution API endpoints / 进化系统 API
+# =============================================================
+@mcp.custom_route("/api/evolution/stats", methods=["GET"])
+async def api_evolution_stats(request):
+    """Get evolution system statistics."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        stats = await evolution_engine.get_stats()
+        return JSONResponse(stats)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/evolution/search", methods=["GET"])
+async def api_evolution_search(request):
+    """Search across all evolution artifacts."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    query = request.query_params.get("q", "")
+    if not query:
+        return JSONResponse({"error": "missing q parameter"}, status_code=400)
+    try:
+        results = await evolution_engine.search_evolution(query)
+        output = []
+        for r in results[:20]:
+            meta = r.get("metadata", {})
+            output.append({
+                "id": r.get("id", ""),
+                "type": meta.get("type", ""),
+                "name": meta.get("name", meta.get("term", meta.get("title", r.get("id", "")))),
+                "content_preview": r.get("content", "")[:200],
+            })
+        return JSONResponse({"results": output})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/evolution/{category}", methods=["GET"])
+async def api_evolution_list(request):
+    """List evolution artifacts by category (persona/slang/encyclopedia/ring/wander/cocreate/worldview)."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    category = request.path_params["category"]
+    try:
+        if category == "persona":
+            card = await evolution_engine.get_persona()
+            return JSONResponse({"persona": card} if card else {"persona": None})
+        elif category == "slang":
+            entries = await evolution_engine.list_slang()
+            return JSONResponse({"entries": [{"id": e["id"], "metadata": e["metadata"], "content_preview": e["content"][:200]} for e in entries]})
+        elif category == "encyclopedia":
+            entries = await evolution_engine.list_encyclopedia()
+            return JSONResponse({"entries": [{"id": e["id"], "metadata": e["metadata"], "content_preview": e["content"][:200]} for e in entries]})
+        elif category == "ring":
+            rings = await evolution_engine.list_rings()
+            return JSONResponse({"rings": [{"id": r["id"], "metadata": r["metadata"], "content_preview": r["content"][:200]} for r in rings]})
+        elif category == "wander":
+            notes = await evolution_engine.list_wander()
+            return JSONResponse({"notes": [{"id": n["id"], "metadata": n["metadata"], "content_preview": n["content"][:200]} for n in notes[:10]]})
+        elif category == "cocreate":
+            entries = await evolution_engine.list_cocreate()
+            return JSONResponse({"entries": [{"id": e["id"], "metadata": e["metadata"], "content_preview": e["content"][:200]} for e in entries]})
+        elif category == "worldview":
+            entries = await evolution_engine.get_worldview()
+            return JSONResponse({"entries": [{"id": e["id"], "metadata": e["metadata"], "content_preview": e["content"][:200]} for e in entries]})
+        else:
+            return JSONResponse({"error": f"Unknown category: {category}"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# =============================================================
 # /api/status — system status for Dashboard settings tab
 # /api/status — Dashboard 设置页用系统状态
 # =============================================================
@@ -2231,6 +2588,24 @@ if __name__ == "__main__":
         sticky_thread = threading.Thread(target=_start_auto_sticky, daemon=True)
         sticky_thread.start()
         logger.info(f"Auto sticky note task started | interval: {STICKY_NOTE_INTERVAL_HOURS}h")
+
+        # --- Evolution engine background tasks / 进化引擎后台任务 ---
+        if evolution_engine.enabled:
+            def _start_evolution_loops():
+                loop = asyncio.new_event_loop()
+                # Run all evolution loops in the same event loop
+                async def _run_all():
+                    await asyncio.gather(
+                        evolution_engine.auto_persona_loop(),
+                        evolution_engine.auto_ring_loop(),
+                        evolution_engine.auto_wander_loop(),
+                        evolution_engine.auto_worldview_loop(),
+                    )
+                loop.run_until_complete(_run_all())
+
+            evo_thread = threading.Thread(target=_start_evolution_loops, daemon=True)
+            evo_thread.start()
+            logger.info("Evolution engine background tasks started")
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---

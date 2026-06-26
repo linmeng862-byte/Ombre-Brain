@@ -58,6 +58,7 @@ class BucketManager:
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
         self.archive_dir = os.path.join(self.base_dir, "archive")
         self.feel_dir = os.path.join(self.base_dir, "feel")
+        self.evolution_dir = os.path.join(self.base_dir, "evolution")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
@@ -110,6 +111,7 @@ class BucketManager:
         name: str = None,
         pinned: bool = False,
         protected: bool = False,
+        **extra_metadata,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -118,6 +120,9 @@ class BucketManager:
         pinned/protected=True: bucket won't be merged, decayed, or have importance changed.
         Importance is locked to 10 for pinned/protected buckets.
         pinned/protected 桶不参与合并与衰减，importance 强制锁定为 10。
+
+        **extra_metadata: additional frontmatter fields (e.g. term, meaning, event, category).
+        **extra_metadata: 额外的 frontmatter 字段（如 term, meaning, event, category）。
         """
         bucket_id = generate_bucket_id()
         bucket_name = sanitize_name(name) if name else bucket_id
@@ -152,6 +157,11 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+
+        # --- Merge extra_metadata into frontmatter ---
+        # --- 合并额外元数据到 frontmatter ---
+        if extra_metadata:
+            metadata.update(extra_metadata)
 
         # --- Assemble Markdown file (frontmatter + body) ---
         # --- 组装 Markdown 文件 ---
@@ -282,6 +292,16 @@ class BucketManager:
             post["digested"] = bool(kwargs["digested"])
         if "model_valence" in kwargs:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
+
+        # --- Extra metadata: any unknown key gets written directly ---
+        # --- 额外元数据：任何未知键直接写入 frontmatter ---
+        known_keys = {
+            "content", "tags", "importance", "domain", "valence", "arousal",
+            "name", "resolved", "pinned", "digested", "model_valence",
+        }
+        for key, value in kwargs.items():
+            if key not in known_keys:
+                post[key] = value
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         post["last_active"] = now_iso()
@@ -628,6 +648,9 @@ class BucketManager:
         buckets = []
 
         dirs = [self.permanent_dir, self.dynamic_dir, self.feel_dir]
+        # Include evolution dir if it exists (safe: no effect if absent)
+        if os.path.exists(self.evolution_dir):
+            dirs.append(self.evolution_dir)
         if include_archive:
             dirs.append(self.archive_dir)
 
@@ -668,6 +691,7 @@ class BucketManager:
             (self.dynamic_dir, "dynamic_count"),
             (self.archive_dir, "archive_count"),
             (self.feel_dir, "feel_count"),
+            (self.evolution_dir, "evolution_count"),
         ]:
             if not os.path.exists(subdir):
                 continue

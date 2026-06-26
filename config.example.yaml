@@ -94,3 +94,12 @@ wikilink:
   auto_top_k: 4
   min_keyword_len: 3
   exclude_keywords: []
+
+# --- Evolution system / 自我进化系统 ---
+evolution:
+  enabled: true
+  slang_min_occurrences: 2
+  persona_update_interval_hours: 12
+  ring_check_interval_hours: 48
+  wander_interval_hours: 12
+  worldview_min_evidence: 3
