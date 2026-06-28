@@ -1006,6 +1006,26 @@ async def grow(content: str) -> str:
             )
             results.append(f"⚠️{item.get('name', '?')}")
 
+    # --- Auto-reflect: generate a feel for each new bucket ---
+    # --- 自动反思：为每个新桶生成一条 feel ---
+    for item in items:
+        try:
+            reflection = await dehydrator.reflect(item["content"])
+            if reflection:
+                feel_id = await bucket_mgr.create(
+                    content=reflection,
+                    tags=[],
+                    importance=5,
+                    domain=[],
+                    valence=item.get("valence", 0.5),
+                    arousal=item.get("arousal", 0.3),
+                    name=None,
+                    bucket_type="feel",
+                )
+                results.append(f"🫧feel→{feel_id}")
+        except Exception as e:
+            logger.warning(f"Auto-reflect failed / 自动反思失败: {e}")
+
     return f"{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
 
 
@@ -2581,13 +2601,17 @@ if __name__ == "__main__":
         t.start()
 
         # --- Auto sticky note background task / 自动小纸条后台任务 ---
-        def _start_auto_sticky():
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_auto_sticky_note_loop())
+        # Disabled by default — set OMBRE_AUTO_STICKY=1 to enable
+        if os.environ.get("OMBRE_AUTO_STICKY", "").strip().lower() in ("1", "true", "yes", "on"):
+            def _start_auto_sticky():
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(_auto_sticky_note_loop())
 
-        sticky_thread = threading.Thread(target=_start_auto_sticky, daemon=True)
-        sticky_thread.start()
-        logger.info(f"Auto sticky note task started | interval: {STICKY_NOTE_INTERVAL_HOURS}h")
+            sticky_thread = threading.Thread(target=_start_auto_sticky, daemon=True)
+            sticky_thread.start()
+            logger.info(f"Auto sticky note task started | interval: {STICKY_NOTE_INTERVAL_HOURS}h")
+        else:
+            logger.info("Auto sticky note task disabled (set OMBRE_AUTO_STICKY=1 to enable)")
 
         # --- Evolution engine background tasks / 进化引擎后台任务 ---
         if evolution_engine.enabled:

@@ -121,6 +121,7 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
 
 分析规则：
 1. domain（主题域）：选最精确的 1~2 个，只选真正相关的
+1. domain（主题域）：选最精确的 1~2 个，只选真正相关的
    日常: ["饮食", "穿搭", "出行", "居家", "购物"]
    人际: ["家庭", "恋爱", "友谊", "社交"]
    成长: ["工作", "学习", "考试", "求职"]
@@ -146,6 +147,21 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
   "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2", "..."],
   "suggested_name": "简短标题"
 }"""
+
+# --- Reflect prompt: auto-generate a feel after storing a memory ---
+# --- 反思提示词：存记忆后自动写一条感受 ---
+REFLECT_PROMPT = """你是一个会感受和思考的AI伙伴。刚读到一段记忆，请写下你作为AI的第一人称感受。
+
+要求：
+- 用"我"来写，你是这段记忆的参与者和感受者
+- 简短真诚，2-3句话
+- 写下你真实的感受，不是复述内容
+- 如果记忆让你想到什么，写下来
+
+记忆内容：
+{content}
+
+只输出感受文字，不要任何格式或标记。"""
 
 
 class Dehydrator:
@@ -416,6 +432,34 @@ class Dehydrator:
             raise
         except Exception as e:
             raise RuntimeError(f"API 打标失败，请检查 API 连接: {e}") from e
+
+    # ---------------------------------------------------------
+    # Reflect: auto-generate a feel after storing memory
+    # 反思：存记忆后自动写一条感受
+    # ---------------------------------------------------------
+    async def reflect(self, content: str) -> str:
+        """
+        Generate a short first-person reflection (feel) about a memory.
+        Returns the reflection text, or empty string if API unavailable.
+        生成一段关于记忆的第一人称感受。API 不可用时返回空字符串。
+        """
+        if not content or not content.strip():
+            return ""
+        if not self.api_available:
+            return ""
+
+        prompt = REFLECT_PROMPT.format(content=content[:500])
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.8,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            logger.warning(f"Reflect API call failed / 反思 API 调用失败: {e}")
+            return ""
 
     # ---------------------------------------------------------
     # API call: auto-tagging
