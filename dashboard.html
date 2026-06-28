@@ -792,6 +792,13 @@
     </div>
 
     <div class="config-section">
+      <h3>📦 备份记忆</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">一键下载所有记忆桶到本地，防止服务器丢失数据。建议定期备份。</p>
+      <button onclick="downloadBackup()" id="backup-btn" style="padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">下载备份 (.json)</button>
+      <span id="backup-status" style="font-size:12px;color:var(--text-dim);margin-left:10px;"></span>
+    </div>
+
+    <div class="config-section">
       <h3>修改密码</h3>
       <div id="settings-env-notice" style="display:none;font-size:12px;color:var(--warning);margin-bottom:10px;">
         ⚠ 当前使用环境变量 OMBRE_DASHBOARD_PASSWORD，请直接修改环境变量。
@@ -967,6 +974,41 @@ async function changePassword() {
   } else {
     const d = await resp.json();
     msgEl.style.color = 'var(--negative)'; msgEl.textContent = d.detail || '修改失败';
+  }
+}
+
+async function downloadBackup() {
+  const btn = document.getElementById('backup-btn');
+  const status = document.getElementById('backup-status');
+  btn.disabled = true;
+  btn.textContent = '备份中…';
+  status.textContent = '';
+
+  try {
+    const resp = await authFetch('/api/buckets');
+    if (!resp) { status.textContent = '认证失败'; return; }
+    const data = await resp.json();
+    const buckets = data.buckets || [];
+    const exportData = {
+      backup_time: new Date().toISOString(),
+      total_buckets: buckets.length,
+      buckets: buckets,
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ombre-backup-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    status.style.color = 'var(--positive)';
+    status.textContent = `✅ 已导出 ${buckets.length} 个记忆桶`;
+  } catch (e) {
+    status.style.color = 'var(--negative)';
+    status.textContent = '导出失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '下载备份 (.json)';
   }
 }
 
